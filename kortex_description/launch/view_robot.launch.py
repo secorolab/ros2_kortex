@@ -76,6 +76,7 @@ def generate_launch_description():
             "dof:=",
             dof,
             " ",
+            "vision:=false",
         ]
     )
     robot_description = {"robot_description": robot_description_content}
