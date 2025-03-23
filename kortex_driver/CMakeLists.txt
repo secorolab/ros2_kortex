@@ -27,6 +27,27 @@ find_package(hardware_interface REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(kortex_api REQUIRED)
+find_package(Eigen3 REQUIRED)
+find_package(orocos_kdl REQUIRED)
+find_package(kdl_parser REQUIRED)
+find_package(urdf REQUIRED)
+find_package(ament_index_cpp REQUIRED)
+find_package(kinova_mediator REQUIRED HINTS ${CMAKE_CURRENT_SOURCE_DIR}/../../kinova_mediator/build)
+
+include_directories(
+    ${orocos_kdl_INCLUDE_DIRS}
+    ${kdl_parser_INCLUDE_DIRS}
+    ${urdf_INCLUDE_DIRS}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../kinova_mediator/include
+    # ${CMAKE_CURRENT_SOURCE_DIR}/../../kinova_mediator/kinova_api/lib/release
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../kinova_mediator/kinova_api/include/client
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../kinova_mediator/kinova_api/include/client_stubs
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../kinova_mediator/kinova_api/include/common
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../kinova_mediator/kinova_api/include/google
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../kinova_mediator/kinova_api/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../kinova_mediator/kinova_api/include/messages
+)
+
 
 #Current: only support Linux x86_64
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
@@ -61,11 +82,23 @@ target_include_directories(
   PRIVATE
   include
 )
+target_link_libraries(
+    ${PROJECT_NAME}
+    ${kdl_parser_LIBRARIES}
+    ${orocos_kdl_LIBRARIES}
+    ${urdf_LIBRARIES}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../kinova_mediator/kinova_api/lib/release/libKortexApiCpp.a
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../kinova_mediator/build/libkinova_mediator.so
+    )
 # kortex_api is the headers for the Kortex API
 ament_target_dependencies(
   ${PROJECT_NAME}
   SYSTEM kortex_api
   hardware_interface
+  kdl_parser
+  orocos_kdl
+  urdf
+  ament_index_cpp
   pluginlib
   rclcpp
 )
@@ -80,6 +113,10 @@ install(
 install(
   DIRECTORY include/
   DESTINATION include
+)
+install(
+  DIRECTORY urdf/
+  DESTINATION share/${PROJECT_NAME}/urdf
 )
 
 if(BUILD_TESTING)
