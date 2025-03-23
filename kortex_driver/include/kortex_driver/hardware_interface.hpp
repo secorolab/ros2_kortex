@@ -32,10 +32,25 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <ament_index_cpp/get_package_share_directory.hpp>
+#include <urdf/model.h>
 
 #include "rclcpp/macros.hpp"
 #include "rclcpp/time.hpp"
 
+#include <kdl/chain.hpp>
+#include <kdl/chainfksolver.hpp>
+#include <kdl/chainfksolverpos_recursive.hpp>
+#include <kdl/chainfksolvervel_recursive.hpp>
+#include <kdl/chainidsolver_recursive_newton_euler.hpp>
+#include <kdl/chainiksolvervel_pinv.hpp>
+#include <kdl/chainjnttojacdotsolver.hpp>
+#include <kdl/chainjnttojacsolver.hpp>
+#include <kdl/frames.hpp>
+#include <kdl/frames_io.hpp>
+#include <kdl_parser/kdl_parser.hpp>
+
+#include <kinova_mediator/mediator.hpp>
 #include "hardware_interface/handle.hpp"
 #include "hardware_interface/hardware_info.hpp"
 #include "hardware_interface/system_interface.hpp"
@@ -43,12 +58,9 @@
 
 #include "kortex_driver/visibility_control.h"
 
-#include "BaseClientRpc.h"
-#include "BaseCyclicClientRpc.h"
-#include "RouterClient.h"
-#include "SessionManager.h"
-#include "TransportClientTcp.h"
-#include "TransportClientUdp.h"
+namespace KinovaConstants1 {
+  constexpr int ACTUATOR_COUNT = 7;
+}  // namespace KinovaConstants1
 
 namespace hardware_interface
 {
@@ -67,11 +79,11 @@ namespace kortex_driver
 enum class StopStartInterface
 {
   NONE,
-  STOP_POS_VEL,
+  STOP_POS_VEL_EFFORT,
   STOP_TWIST,
   STOP_GRIPPER,
   STOP_FAULT_CTRL,
-  START_POS_VEL,
+  START_POS_VEL_EFFORT,
   START_TWIST,
   START_GRIPPER,
   START_FAULT_CTRL,
@@ -114,24 +126,14 @@ public:
   return_type write(const rclcpp::Time & time, const rclcpp::Duration & period) final;
 
 private:
-  k_api::TransportClientTcp transport_tcp_;
-  k_api::RouterClient router_tcp_;
-  k_api::SessionManager session_manager_;
-  k_api::TransportClientUdp transport_udp_realtime_;
-  k_api::RouterClient router_udp_realtime_;
-  k_api::SessionManager session_manager_real_time_;
+  // kinova mediator
+  robot_id robot_id_;
 
   // twist temporary command
-  Kinova::Api::Base::Twist * k_api_twist_;
+  k_api::Base::Twist * k_api_twist_;
   k_api::Base::TwistCommand k_api_twist_command_;
 
-  // Control of the robot arm itself
-  k_api::Base::BaseClient base_;
-  k_api::BaseCyclic::BaseCyclicClient base_cyclic_;
-  k_api::BaseCyclic::Command base_command_;
-  std::size_t actuator_count_;
   // To minimize bandwidth we synchronize feedback with the robot only when write() is called
-  k_api::BaseCyclic::Feedback feedback_;
   std::vector<double> arm_commands_positions_;
   std::vector<double> arm_commands_velocities_;
   std::vector<double> arm_commands_efforts_;
@@ -141,6 +143,9 @@ private:
 
   // twist command interfaces
   std::vector<double> twist_commands_;
+
+  // initialize the mediator
+  std::shared_ptr<kinova_mediator> mediator_;
 
   // Gripper
   k_api::GripperCyclic::MotorCommand * gripper_motor_command_;
@@ -154,27 +159,16 @@ private:
 
   rclcpp::Time controller_switch_time_;
   std::atomic<bool> block_write = false;
-  k_api::Base::ServoingMode arm_mode_;
-
-  // Enum defining at which control level we are
-  // Dumb way of maintaining the command_interface type per joint.
-  enum class integration_lvl_t : std::uint8_t
-  {
-    UNDEFINED = 0,
-    POSITION = 1,
-    VELOCITY = 2,
-    EFFORT = 3
-  };
-
-  std::vector<integration_lvl_t> arm_joints_control_level_;
 
   // changing active controller on the hardware
-  k_api::Base::ServoingModeInformation servoing_mode_hw_;
   // what controller is running
   bool joint_based_controller_running_;
   bool twist_controller_running_;
   bool gripper_controller_running_;
   bool fault_controller_running_;
+  bool joint_position_controller_running_;
+  bool joint_velocity_controller_running_;
+  bool joint_effort_controller_running_;
   // switching auxiliary vars
   // keeping track of which controller is active so appropriate control mode can be adjusted
   // controller manager sends array of interfaces that should be stopped/started and this is the
@@ -187,10 +181,16 @@ private:
   bool stop_twist_controller_;
   bool stop_gripper_controller_;
   bool stop_fault_controller_;
+  bool stop_joint_position_controller_;
+  bool stop_joint_velocity_controller_;
+  bool stop_joint_effort_controller_;
   bool start_joint_based_controller_;
   bool start_twist_controller_;
   bool start_gripper_controller_;
   bool start_fault_controller_;
+  bool start_joint_position_controller_;
+  bool start_joint_velocity_controller_;
+  bool start_joint_effort_controller_;
 
   // first pass flag
   bool first_pass_;
@@ -202,6 +202,7 @@ private:
   // temp variables to use in update loop
   float cmd_degrees_tmp_;
   float cmd_vel_tmp_;
+  float cmd_eff_tmp_;
   int num_turns_tmp_ = 0;
 
   // fault control
@@ -218,6 +219,95 @@ private:
     k_api::Base::ServoingMode arm_mode, double position, double velocity, double force);
 
   void readGripperPosition();
+
+  // urdf and KDL
+  KDL::Tree kinematic_tree;
+  KDL::Chain chain_urdf;
+  
+  const KDL::Vector gravityVectorLeft;  // [in BL] the negative of this gravity vector is considered as input acceleration for the force controller
+  const KDL::Vector gravityVectorRight;  // [in BL] the negative of this gravity vector is considered as input acceleration for the force controller
+
+  // Declarations of the transformation-related variables
+  const KDL::Vector BL_x_axis_wrt_GF_left;
+  const KDL::Vector BL_y_axis_wrt_GF_left;
+  const KDL::Vector BL_z_axis_wrt_GF_left;
+  const KDL::Vector BL_position_wrt_GF_left;
+
+  const KDL::Vector BL_x_axis_wrt_GF_right;
+  const KDL::Vector BL_y_axis_wrt_GF_right;
+  const KDL::Vector BL_z_axis_wrt_GF_right;
+  const KDL::Vector BL_position_wrt_GF_right;
+
+  const KDL::Rotation BL_wrt_GF_left; // added as columns
+  const KDL::Rotation BL_wrt_GF_right; // added as columns
+  
+  const KDL::Frame BL_wrt_GF_frame_left;
+  const KDL::Frame BL_wrt_GF_frame_right;
+  KDL::Frame BL_wrt_GF_frame;
+
+  // end effector Pose
+  KDL::Frame measured_endEffPose_BL_arm;
+  KDL::Frame measured_endEffPose_GF_arm;
+  KDL::FrameVel measured_endEffTwist_BL_arm;
+  KDL::FrameVel measured_endEffTwist_GF_arm;
+
+  // Joint variables
+  KDL::JntArray jnt_positions;
+  KDL::JntArray jnt_velocities;   // has only joint velocities of all joints
+  KDL::JntArray jnt_torques_read; // to read from the robot
+
+  KDL::JntArray jnt_torques_cmd;  // to send to the robot
+  KDL::JntArrayVel jnt_velocity;  // has both joint position and joint velocity of all joints
+
+  KDL::JntArray jnt_accelerations;
+  KDL::JntArray zero_jnt_velocities;
+  
+  KDL::Wrenches linkWrenches_GF;
+  KDL::Wrenches linkWrenches_EE;
+  
+  
+  /* KDL solvers */
+  std::shared_ptr<KDL::ChainJntToJacDotSolver> jacobDotSolver;
+  std::shared_ptr<KDL::ChainFkSolverPos_recursive> fkSolverPos;
+  std::shared_ptr<KDL::ChainFkSolverVel_recursive> fkSolverVel;
+  std::shared_ptr<KDL::ChainIkSolverVel_pinv> ikSolverAcc;
+  std::shared_ptr<KDL::ChainIdSolver_RNE> idSolver;
+
+  // cartesian acceleration
+  KDL::Twist xdd;
+  KDL::Twist xdd_minus_jd_qd;
+  KDL::Twist jd_qd;
+
+  void calculate_joint_torques_RNEA(
+    std::shared_ptr<KDL::ChainJntToJacDotSolver> &jacobDotSolver,
+    std::shared_ptr<KDL::ChainIkSolverVel_pinv> &ikSolverAcc,
+    std::shared_ptr<KDL::ChainIdSolver_RNE> &idSolver,
+    KDL::JntArrayVel &jnt_velocity,
+    KDL::Twist &jd_qd,
+    KDL::Twist &xdd,
+    KDL::Twist &xdd_minus_jd_qd,
+    KDL::JntArray &jnt_accelerations,
+    KDL::JntArray &jnt_positions,
+    KDL::JntArray &jnt_velocities,
+    KDL::Wrenches &linkWrenches_EE,
+    KDL::JntArray &jnt_torques);
+
+  void get_end_effector_pose_and_twist(KDL::JntArrayVel &jnt_velocity,
+    const KDL::JntArray &jnt_positions,
+    const KDL::JntArray &jnt_velocities,
+    KDL::Frame &measured_endEffPose_BL,
+    KDL::FrameVel &measured_endEffTwist_BL,
+    KDL::Frame &measured_endEffPose_GF,
+    KDL::FrameVel &measured_endEffTwist_GF,
+    std::shared_ptr<KDL::ChainFkSolverPos_recursive> &fkSolverPos,
+    std::shared_ptr<KDL::ChainFkSolverVel_recursive> &fkSolverVel,
+    const KDL::Frame &BL_wrt_GF_frame);
+
+  void kinova_feedback(std::shared_ptr<kinova_mediator> kinova_arm_mediator,
+    KDL::JntArray &jnt_positions,
+    KDL::JntArray &jnt_velocities,
+    KDL::JntArray &jnt_torques);
+
 };
 
 }  // namespace kortex_driver
